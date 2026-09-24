@@ -3,6 +3,8 @@ package com.example.util
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -89,6 +91,16 @@ class VoiceAssistantManager(private val context: Context) : TextToSpeech.OnInitL
     val previewingVoiceId: StateFlow<String?> = _previewingVoiceId.asStateFlow()
 
     var onSpeechResultListener: ((String) -> Unit)? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun runOnMainThread(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
+        }
+    }
 
     init {
         initTts()
@@ -366,152 +378,191 @@ class VoiceAssistantManager(private val context: Context) : TextToSpeech.OnInitL
     }
 
     fun previewVoice(option: MaxVoiceOption, sampleText: String = SAMPLE_PHRASE) {
-        if (!isTtsInitialized) return
+        runOnMainThread {
+            if (!isTtsInitialized) return@runOnMainThread
 
-        if (_previewingVoiceId.value == option.id && _isSpeaking.value) {
-            stopSpeaking()
-            _previewingVoiceId.value = null
-            applyVoiceSettings(_selectedVoice.value)
-            return
+            if (_previewingVoiceId.value == option.id && _isSpeaking.value) {
+                stopSpeaking()
+                _previewingVoiceId.value = null
+                applyVoiceSettings(_selectedVoice.value)
+                return@runOnMainThread
+            }
+
+            try {
+                speechRecognizer?.stopListening()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping SpeechRecognizer before preview", e)
+            }
+            _isListening.value = false
+            tts?.stop()
+
+            applyVoiceSettings(option)
+            _previewingVoiceId.value = option.id
+            _isSpeaking.value = true
+            _voiceStatus.value = "Sample bol raha hai..."
+
+            val params = Bundle().apply {
+                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "sample_preview_${option.id}")
+            }
+            tts?.speak(sampleText, TextToSpeech.QUEUE_FLUSH, params, "sample_preview_${option.id}")
         }
-
-        speechRecognizer?.stopListening()
-        _isListening.value = false
-        tts?.stop()
-
-        applyVoiceSettings(option)
-        _previewingVoiceId.value = option.id
-        _isSpeaking.value = true
-        _voiceStatus.value = "Sample bol raha hai..."
-
-        val params = Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "sample_preview_${option.id}")
-        }
-        tts?.speak(sampleText, TextToSpeech.QUEUE_FLUSH, params, "sample_preview_${option.id}")
     }
 
     private fun initSpeechRecognizer() {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        _isListening.value = true
-                        _voiceStatus.value = "Suno... Abhi bolo"
+        runOnMainThread {
+            if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                try {
+                    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                        setRecognitionListener(object : RecognitionListener {
+                            override fun onReadyForSpeech(params: Bundle?) {
+                                _isListening.value = true
+                                _voiceStatus.value = "Suno... Abhi bolo"
+                            }
+
+                            override fun onBeginningOfSpeech() {
+                                BatteryOptimizationManager.reportUserActivity()
+                                _voiceStatus.value = "Aapki aawaaz sun raha hoon..."
+                            }
+
+                            override fun onRmsChanged(rmsdB: Float) {
+                                // Normalize amplitude (roughly 0.0 to 1.0)
+                                val norm = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+                                _speechAmplitude.value = norm
+                            }
+
+                            override fun onBufferReceived(buffer: ByteArray?) {}
+
+                            override fun onEndOfSpeech() {
+                                _isListening.value = false
+                                _voiceStatus.value = "Aawaaz analyze ho rahi hai..."
+                                _speechAmplitude.value = 0f
+                            }
+
+                            override fun onError(error: Int) {
+                                _isListening.value = false
+                                _speechAmplitude.value = 0f
+                                val errMsg = when (error) {
+                                    SpeechRecognizer.ERROR_NO_MATCH -> "Kuch samajh nahi aaya, dobara bolo."
+                                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Samay khatam ho gaya."
+                                    else -> "Mic error ($error)"
+                                }
+                                _voiceStatus.value = errMsg
+                            }
+
+                            override fun onResults(results: Bundle?) {
+                                _isListening.value = false
+                                _speechAmplitude.value = 0f
+                                BatteryOptimizationManager.reportUserActivity()
+                                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                val text = matches?.firstOrNull() ?: ""
+                                if (text.isNotBlank()) {
+                                    _transcript.value = text
+                                    _voiceStatus.value = "Command: \"$text\""
+                                    onSpeechResultListener?.invoke(text)
+                                } else {
+                                    _voiceStatus.value = "Aawaaz spashth nahi thi."
+                                }
+                            }
+
+                            override fun onPartialResults(partialResults: Bundle?) {
+                                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                matches?.firstOrNull()?.let {
+                                    _transcript.value = it
+                                }
+                            }
+
+                            override fun onEvent(eventType: Int, params: Bundle?) {}
+                        })
                     }
-
-                    override fun onBeginningOfSpeech() {
-                        BatteryOptimizationManager.reportUserActivity()
-                        _voiceStatus.value = "Aapki aawaaz sun raha hoon..."
-                    }
-
-                    override fun onRmsChanged(rmsdB: Float) {
-                        // Normalize amplitude (roughly 0.0 to 1.0)
-                        val norm = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
-                        _speechAmplitude.value = norm
-                    }
-
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-
-                    override fun onEndOfSpeech() {
-                        _isListening.value = false
-                        _voiceStatus.value = "Aawaaz analyze ho rahi hai..."
-                        _speechAmplitude.value = 0f
-                    }
-
-                    override fun onError(error: Int) {
-                        _isListening.value = false
-                        _speechAmplitude.value = 0f
-                        val errMsg = when (error) {
-                            SpeechRecognizer.ERROR_NO_MATCH -> "Kuch samajh nahi aaya, dobara bolo."
-                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Samay khatam ho gaya."
-                            else -> "Mic error ($error)"
-                        }
-                        _voiceStatus.value = errMsg
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        _isListening.value = false
-                        _speechAmplitude.value = 0f
-                        BatteryOptimizationManager.reportUserActivity()
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val text = matches?.firstOrNull() ?: ""
-                        if (text.isNotBlank()) {
-                            _transcript.value = text
-                            _voiceStatus.value = "Command: \"$text\""
-                            onSpeechResultListener?.invoke(text)
-                        } else {
-                            _voiceStatus.value = "Aawaaz spashth nahi thi."
-                        }
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        matches?.firstOrNull()?.let {
-                            _transcript.value = it
-                        }
-                    }
-
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to create SpeechRecognizer", e)
+                }
             }
         }
     }
 
     fun startListening() {
-        BatteryOptimizationManager.reportUserActivity()
-        if (_isSpeaking.value) {
-            tts?.stop()
-            _isSpeaking.value = false
-        }
+        runOnMainThread {
+            BatteryOptimizationManager.reportUserActivity()
+            if (_isSpeaking.value) {
+                tts?.stop()
+                _isSpeaking.value = false
+            }
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
-            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-        }
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
+                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            }
 
-        speechRecognizer?.startListening(intent)
+            try {
+                speechRecognizer?.startListening(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error starting SpeechRecognizer", e)
+            }
+        }
     }
 
     fun stopListening() {
-        speechRecognizer?.stopListening()
-        _isListening.value = false
-        _speechAmplitude.value = 0f
+        runOnMainThread {
+            try {
+                speechRecognizer?.stopListening()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping SpeechRecognizer", e)
+            }
+            _isListening.value = false
+            _speechAmplitude.value = 0f
+        }
     }
 
     fun speak(hindiText: String, onComplete: (() -> Unit)? = null) {
-        BatteryOptimizationManager.reportUserActivity()
-        if (!isTtsInitialized) {
-            onComplete?.invoke()
-            return
+        runOnMainThread {
+            BatteryOptimizationManager.reportUserActivity()
+            if (!isTtsInitialized) {
+                onComplete?.invoke()
+                return@runOnMainThread
+            }
+            try {
+                speechRecognizer?.stopListening()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping SpeechRecognizer before speak", e)
+            }
+            _isListening.value = false
+
+            // Always ensure user's selected voice and tuning are applied
+            applyVoiceSettings(_selectedVoice.value)
+
+            activeOnCompleteCallback = onComplete
+            _voiceStatus.value = "Max bol raha hai..."
+            tts?.speak(hindiText, TextToSpeech.QUEUE_FLUSH, null, "max_tts_utterance")
         }
-        speechRecognizer?.stopListening()
-        _isListening.value = false
-
-        // Always ensure user's selected voice and tuning are applied
-        applyVoiceSettings(_selectedVoice.value)
-
-        activeOnCompleteCallback = onComplete
-        _voiceStatus.value = "Max bol raha hai..."
-        tts?.speak(hindiText, TextToSpeech.QUEUE_FLUSH, null, "max_tts_utterance")
     }
 
     fun stopSpeaking() {
-        tts?.stop()
-        _isSpeaking.value = false
-        if (_previewingVoiceId.value != null) {
-            _previewingVoiceId.value = null
-            applyVoiceSettings(_selectedVoice.value)
+        runOnMainThread {
+            tts?.stop()
+            _isSpeaking.value = false
+            if (_previewingVoiceId.value != null) {
+                _previewingVoiceId.value = null
+                applyVoiceSettings(_selectedVoice.value)
+            }
         }
     }
 
     fun destroy() {
         BatteryOptimizationManager.forceSleepListening()
         BatteryOptimizationManager.releaseAllWakeLocks()
-        speechRecognizer?.destroy()
-        tts?.shutdown()
+        runOnMainThread {
+            try {
+                speechRecognizer?.destroy()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error destroying SpeechRecognizer", e)
+            }
+            speechRecognizer = null
+            tts?.shutdown()
+        }
     }
 }
