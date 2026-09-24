@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Max</string>
+    <string name="accessibility_service_label">Max AI Voice Control</string>
+    <string name="accessibility_service_description">Max uses Accessibility Service to inspect screen elements and simulate touch actions on behalf of your voice instructions.</string>
+</resources>

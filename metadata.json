@@ -1,0 +1,6 @@
+{
+  "name": "Max AI Voice Assistant",
+  "description": "AI Voice Assistant that controls YouTube and Android apps via Accessibility Service and Gemini reasoning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
