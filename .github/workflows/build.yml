@@ -36,6 +36,13 @@ jobs:
           fi
           chmod +x gradlew
 
+      - name: Restore Debug Keystore If Needed
+        run: |
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            echo "Restoring debug.keystore from debug.keystore.base64..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
