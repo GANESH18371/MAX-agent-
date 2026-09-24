@@ -31,31 +31,6 @@ object LocalCommandRouter {
 
     private const val TAG = "LocalCommandRouter"
 
-    private val ALIAS_MAP = mapOf(
-        "insta" to "instagram",
-        "ig" to "instagram",
-        "yt" to "youtube",
-        "yt music" to "youtube music",
-        "fb" to "facebook",
-        "fblite" to "facebook",
-        "fb lite" to "facebook",
-        "facebook lite" to "facebook",
-        "wa" to "whatsapp",
-        "whatsapp business" to "whatsapp",
-        "gmaps" to "maps",
-        "google maps" to "maps",
-        "playstore" to "play store",
-        "play store" to "play store",
-        "photos" to "gallery",
-        "photo" to "gallery",
-        "chrome" to "chrome",
-        "browser" to "chrome",
-        "settings" to "settings",
-        "camera" to "camera",
-        "dialer" to "phone",
-        "call" to "phone"
-    )
-
     fun tryExecuteLocalCommand(
         context: Context,
         voiceAssistant: VoiceAssistantManager,
@@ -63,6 +38,18 @@ object LocalCommandRouter {
     ): LocalExecutionResult {
         val cleanCmd = commandText.trim().lowercase()
         Log.d(TAG, "Evaluating command for local routing: \"$cleanCmd\"")
+
+        // 1. FAST 100% OFFLINE APP OPENING VIA GENERIC APP CONTROLLER
+        val appOpenRes = GenericAppController.tryOpenAppOffline(context, commandText)
+        if (appOpenRes.isHandled) {
+            return LocalExecutionResult(
+                isHandledLocally = true,
+                spokenResponseHindi = appOpenRes.spokenResponseHindi,
+                actionType = "OPEN_APP",
+                isSuccess = appOpenRes.isSuccess,
+                message = appOpenRes.message
+            )
+        }
 
         // --- PART 0: OWNER / CREATOR IDENTITY COMMANDS ---
         if (isMatch(cleanCmd, listOf("kisne banaya", "owner kaun", "creator kaun", "tum kaun ho", "aap kaun ho", "who created you", "who made you", "who is your owner", "owner name", "creator name", "kiska assistant", "tumhe kisne"))) {
@@ -448,14 +435,16 @@ object LocalCommandRouter {
             return SystemToggleController.handleLocation(context, targetEnable = false)
         }
 
-        // GENERIC APP LAUNCHING
-        if (cleanCmd.endsWith("kholo") || cleanCmd.endsWith("open") || cleanCmd.endsWith("chalu karo") ||
-            cleanCmd.startsWith("open ") || cleanCmd.startsWith("kholo ") || cleanCmd.endsWith("chalao")
-        ) {
-            val appLaunchRes = matchAndLaunchAnyInstalledApp(context, cleanCmd)
-            if (appLaunchRes.isHandledLocally) {
-                return appLaunchRes
-            }
+        // GENERIC APP LAUNCHING (Handled offline via GenericAppController)
+        val appLaunchRes = GenericAppController.tryOpenAppOffline(context, cleanCmd)
+        if (appLaunchRes.isHandled) {
+            return LocalExecutionResult(
+                isHandledLocally = true,
+                spokenResponseHindi = appLaunchRes.spokenResponseHindi,
+                actionType = "OPEN_APP",
+                isSuccess = appLaunchRes.isSuccess,
+                message = appLaunchRes.message
+            )
         }
 
         Log.d(TAG, "Command \"$cleanCmd\" is not a local shortcut. Forwarding to Gemini AI.")
@@ -471,89 +460,6 @@ object LocalCommandRouter {
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error opening setting: $action", e)
-            false
-        }
-    }
-
-    fun matchAndLaunchAnyInstalledApp(context: Context, rawCommand: String): LocalExecutionResult {
-        val eval = ConfirmationManager.evaluateAppQuery(context, rawCommand)
-        when (eval.status) {
-            ConfirmationMatchStatus.DIRECT_EXECUTE -> {
-                val candidate = eval.bestCandidate ?: return LocalExecutionResult(isHandledLocally = false)
-                val success = launchPackageOrCamera(context, candidate.packageName)
-                return LocalExecutionResult(
-                    isHandledLocally = true,
-                    spokenResponseHindi = "${candidate.appLabel} khol raha hoon.",
-                    actionType = "OPEN_APP",
-                    isSuccess = success,
-                    message = "Opened ${candidate.appLabel} (${candidate.packageName}) with confidence ${eval.confidenceScore}%"
-                )
-            }
-            ConfirmationMatchStatus.NEED_CONFIRMATION -> {
-                val candidate = eval.bestCandidate ?: return LocalExecutionResult(isHandledLocally = false)
-                ConfirmationManager.setPendingConfirmation(
-                    command = rawCommand,
-                    targetPackage = candidate.packageName,
-                    targetAppName = candidate.appLabel,
-                    candidates = eval.candidates
-                )
-                return LocalExecutionResult(
-                    isHandledLocally = true,
-                    spokenResponseHindi = eval.spokenPromptHindi,
-                    actionType = "AWAITING_CONFIRMATION",
-                    isSuccess = true,
-                    message = "Awaiting confirmation for ${candidate.appLabel} (confidence: ${eval.confidenceScore}%)"
-                )
-            }
-            ConfirmationMatchStatus.MULTIPLE_MATCHES -> {
-                val candidate = eval.bestCandidate ?: return LocalExecutionResult(isHandledLocally = false)
-                ConfirmationManager.setPendingConfirmation(
-                    command = rawCommand,
-                    targetPackage = candidate.packageName,
-                    targetAppName = candidate.appLabel,
-                    candidates = eval.candidates
-                )
-                return LocalExecutionResult(
-                    isHandledLocally = true,
-                    spokenResponseHindi = eval.spokenPromptHindi,
-                    actionType = "AWAITING_CHOICE",
-                    isSuccess = true,
-                    message = "Awaiting choice between multiple candidates (confidence: ${eval.confidenceScore}%)"
-                )
-            }
-            ConfirmationMatchStatus.NOT_FOUND -> {
-                return LocalExecutionResult(
-                    isHandledLocally = true,
-                    spokenResponseHindi = eval.spokenPromptHindi,
-                    actionType = "APP_NOT_FOUND",
-                    isSuccess = false,
-                    message = "App not found on device"
-                )
-            }
-        }
-    }
-
-    private fun launchPackageOrCamera(context: Context, packageName: String): Boolean {
-        return try {
-            if (packageName == "android.media.action.STILL_IMAGE_CAMERA" || packageName.contains("camera")) {
-                val cameraIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(cameraIntent)
-                true
-            } else {
-                val pm = context.packageManager
-                val launchIntent = pm.getLaunchIntentForPackage(packageName)
-                if (launchIntent != null) {
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(launchIntent)
-                    true
-                } else {
-                    false
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error launching package: $packageName", e)
             false
         }
     }

@@ -530,7 +530,47 @@ class MaxViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // STEP 1: LOCAL COMMAND ROUTER (Fast, offline app opening via PackageManager fuzzy matching, weather, reminders & hardware controls)
+                // STEP 1: LOCAL APP OPENING & LOCAL COMMAND ROUTER (100% Offline, Zero Gemini Call)
+                val directAppOpen = com.example.util.GenericAppController.tryOpenAppOffline(getApplication(), effectiveCommand)
+                if (directAppOpen.isHandled) {
+                    postToastAndLog("⚡ App Opened LOCALLY: ${directAppOpen.appLabel} (${directAppOpen.packageName})")
+                    if (directAppOpen.spokenResponseHindi.isNotBlank()) {
+                        launch(Dispatchers.Main) {
+                            voiceAssistant.speak(directAppOpen.spokenResponseHindi)
+                        }
+                    }
+
+                    _lastDecision.value = MaxAiDecision(
+                        action = "OPEN_APP",
+                        targetText = directAppOpen.appLabel,
+                        packageName = directAppOpen.packageName,
+                        spokenResponseHindi = directAppOpen.spokenResponseHindi,
+                        reasoning = "100% Offline Local Launch: ${directAppOpen.message}"
+                    )
+
+                    repository.logAction(
+                        userCommand = commandText,
+                        targetApp = directAppOpen.appLabel,
+                        aiReasoning = "Offline GenericAppController",
+                        actionType = "OPEN_APP",
+                        actionDetail = directAppOpen.message,
+                        isSuccess = directAppOpen.isSuccess
+                    )
+
+                    com.example.util.ContextManager.recordInteraction(
+                        userCommand = commandText,
+                        resolvedCommand = effectiveCommand,
+                        appPackage = directAppOpen.packageName,
+                        appName = directAppOpen.appLabel,
+                        actionType = "OPEN_APP",
+                        targetText = directAppOpen.message,
+                        spokenResponse = directAppOpen.spokenResponseHindi
+                    )
+
+                    _isProcessing.value = false
+                    return@launch
+                }
+
                 val localResult = LocalCommandRouter.tryExecuteLocalCommand(getApplication(), voiceAssistant, effectiveCommand)
 
                 if (localResult.isHandledLocally) {
@@ -588,11 +628,7 @@ class MaxViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                val dump = service?.getScreenStateDump() ?: ScreenStateDump(
-                    packageName = _currentApp.value,
-                    rootNodesFormatted = "Accessibility service inactive. Analyzing command context.",
-                    totalClickables = 0
-                )
+                val dump = com.example.util.GenericAppController.readScreenContent(service)
                 _screenDump.value = dump
 
                 // Build Short-term Interaction History (Last 8 interactions)
@@ -686,9 +722,9 @@ class MaxViewModel(application: Application) : AndroidViewModel(application) {
                         val appQuery = decision.packageName.ifBlank { commandText }
                         postToastAndLog("🚀 Opening app dynamically: $appQuery")
 
-                        val launchRes = LocalCommandRouter.matchAndLaunchAnyInstalledApp(getApplication(), appQuery)
-                        actionSuccess = launchRes.isSuccess
-                        failureDetail = launchRes.message
+                        val directLaunch = com.example.util.GenericAppController.tryOpenAppOffline(getApplication(), appQuery)
+                        actionSuccess = directLaunch.isSuccess
+                        failureDetail = directLaunch.message
 
                         if (actionSuccess && decision.textToType.isNotBlank()) {
                             delay(2000)
@@ -709,51 +745,65 @@ class MaxViewModel(application: Application) : AndroidViewModel(application) {
 
                     "CLICK" -> {
                         val target = decision.targetText
-                        if (target.isNotBlank()) {
-                            postToastAndLog("👉 Attempting click on element: \"$target\"")
-                            if (service != null) {
-                                actionSuccess = service.findAndClick(target)
-                                if (!actionSuccess) {
-                                    postToastAndLog("⚠️ Click failed. Trying center tap fallback...")
-                                    service.tapAtCoordinates(540f, 1000f)
-                                    actionSuccess = true
-                                    failureDetail = "Fallback center tap"
-                                }
-                            } else {
-                                failureDetail = "Accessibility Service OFF"
-                                postToastAndLog("❌ Click FAILED: Accessibility Service is OFF")
-                            }
+                        postToastAndLog("👉 Attempting click on element: \"$target\"")
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = "CLICK",
+                            target = target,
+                            x = 540f,
+                            y = 1000f
+                        )
+                        if (!actionSuccess) {
+                            failureDetail = if (service == null) "Accessibility Service OFF" else "Target not found"
                         }
                     }
 
-                    "TYPE_TEXT" -> {
+                    "TYPE_TEXT", "TYPE" -> {
                         val query = decision.textToType
-                        if (query.isNotBlank()) {
-                            postToastAndLog("⌨️ Typing text: \"$query\"")
-                            if (service != null) {
-                                service.findAndClick("Search")
-                                delay(600)
-                                actionSuccess = service.typeTextIntoActiveField(query)
-                            } else {
-                                failureDetail = "Accessibility Service OFF"
-                                postToastAndLog("❌ Type FAILED: Accessibility Service is OFF")
-                            }
+                        postToastAndLog("⌨️ Typing text: \"$query\"")
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = "TYPE",
+                            target = decision.targetText,
+                            textToType = query
+                        )
+                        if (!actionSuccess) {
+                            failureDetail = if (service == null) "Accessibility Service OFF" else "Typing failed"
                         }
                     }
 
                     "SWIPE" -> {
-                        postToastAndLog("👇 Executing swipe gesture [${decision.swipeDirection}]")
-                        if (service != null) {
-                            when (decision.swipeDirection.uppercase()) {
-                                "UP" -> service.performSwipe(500f, 1500f, 500f, 400f)
-                                "DOWN" -> service.performSwipe(500f, 400f, 500f, 1500f)
-                                else -> service.performSwipe(500f, 1200f, 500f, 500f)
-                            }
-                            actionSuccess = true
-                        } else {
-                            failureDetail = "Accessibility Service OFF"
-                            postToastAndLog("❌ Swipe FAILED: Accessibility Service is OFF")
+                        val dir = decision.swipeDirection.uppercase()
+                        postToastAndLog("👇 Executing swipe gesture [$dir]")
+                        val action = if (dir == "DOWN") "SCROLL_UP" else "SCROLL_DOWN"
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = action
+                        )
+                        if (!actionSuccess) {
+                            failureDetail = if (service == null) "Accessibility Service OFF" else "Swipe failed"
                         }
+                    }
+
+                    "BACK" -> {
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = "BACK"
+                        )
+                    }
+
+                    "HOME" -> {
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = "HOME"
+                        )
+                    }
+
+                    "RECENTS" -> {
+                        actionSuccess = com.example.util.GenericAppController.executeAccessibilityAction(
+                            service = service,
+                            action = "RECENTS"
+                        )
                     }
 
                     else -> {

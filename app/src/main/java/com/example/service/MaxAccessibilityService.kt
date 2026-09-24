@@ -51,28 +51,12 @@ class MaxAccessibilityService : AccessibilityService() {
                     context.startActivity(intent)
                     Pair(true, "Opened URL: $targetPackageOrUrl")
                 } else {
-                    val pm = context.packageManager
-                    val launchIntent = pm.getLaunchIntentForPackage(targetPackageOrUrl)
-                    if (launchIntent != null) {
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(launchIntent)
+                    val success = com.example.util.GenericAppController.launchAppByPackage(context, targetPackageOrUrl)
+                    if (success) {
                         Pair(true, "App $targetPackageOrUrl launched successfully")
                     } else {
-                        // Fallback: search installed apps matching label
-                        val installed = pm.getInstalledApplications(0)
-                        val match = installed.firstOrNull {
-                            pm.getApplicationLabel(it).toString().contains(targetPackageOrUrl, ignoreCase = true)
-                        }
-                        if (match != null) {
-                            val intent = pm.getLaunchIntentForPackage(match.packageName)?.apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            if (intent != null) {
-                                context.startActivity(intent)
-                                return Pair(true, "App ${match.packageName} launched")
-                            }
-                        }
-                        Pair(false, "App package or label '$targetPackageOrUrl' not installed")
+                        val offlineRes = com.example.util.GenericAppController.tryOpenAppOffline(context, targetPackageOrUrl)
+                        Pair(offlineRes.isSuccess, offlineRes.message.ifBlank { "App '$targetPackageOrUrl' not found" })
                     }
                 }
             } catch (e: Exception) {
@@ -453,6 +437,6 @@ class MaxAccessibilityService : AccessibilityService() {
      * Launches external app by package name
      */
     fun openApp(packageName: String): Boolean {
-        return launchAppOrUrl(this, packageName).first
+        return com.example.util.GenericAppController.launchAppByPackage(this, packageName)
     }
 }

@@ -340,7 +340,7 @@ object ConfirmationManager {
 
             val targetPkg = pendingTargetPackage
             val targetName = pendingTargetAppName
-            val success = launchPackageOrCamera(context, targetPkg)
+            val success = GenericAppController.launchAppByPackage(context, targetPkg)
 
             clearConfirmation()
 
@@ -379,7 +379,7 @@ object ConfirmationManager {
 
             if (selectedCandidate != null) {
                 Log.d(TAG, "CONFIRMATION_RESOLVED: haan, action=executed")
-                launchPackageOrCamera(context, selectedCandidate.packageName)
+                GenericAppController.launchAppByPackage(context, selectedCandidate.packageName)
                 clearConfirmation()
 
                 return ConfirmationResolution(
@@ -400,30 +400,5 @@ object ConfirmationManager {
             isHandled = false,
             action = "unrelated"
         )
-    }
-
-    private fun launchPackageOrCamera(context: Context, packageName: String): Boolean {
-        return try {
-            if (packageName == "android.media.action.STILL_IMAGE_CAMERA" || packageName.contains("camera")) {
-                val intent = Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-                true
-            } else {
-                val pm = context.packageManager
-                val intent = pm.getLaunchIntentForPackage(packageName)
-                if (intent != null) {
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                    true
-                } else {
-                    false
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error launching confirmed package $packageName", e)
-            false
-        }
     }
 }
